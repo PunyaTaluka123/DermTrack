@@ -1,15 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useSpeechRecognition } from "@/lib/useSpeechRecognition";
 
 export default function Consult() {
   const [recording, setRecording] = useState(false);
   const [status, setStatus] = useState("Idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [checkingAudio, setCheckingAudio] = useState(false);
+  const [audioVerified, setAudioVerified] = useState(false);
+  const [elapsed, setElapsed] = useState(0); // seconds
+  const [liveNotes, setLiveNotes] = useState("");
+  const timerRef = useRef<number | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const router = useRouter();
+  const search = useSearchParams();
 
   const {
     supported: speechSupported,
@@ -21,6 +28,8 @@ export default function Consult() {
     stop: stopSpeech,
     reset: resetSpeech,
   } = useSpeechRecognition({ lang: "en-US" });
+
+  // Visualizer removed per request
 
   useEffect(() => {
     // Require login before allowing transcription
@@ -35,24 +44,88 @@ export default function Consult() {
       }
     };
     checkAuth();
+    // Capture patient_id from query and stash for review preselect
+    const pid = search?.get('patient_id');
+    if (pid) {
+      try { sessionStorage.setItem('selectedPatientId', String(parseInt(pid, 10))); } catch {}
+    }
     return () => {
       mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop());
       stopSpeech();
+      if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [stopSpeech]);
+  }, [stopSpeech, search]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const stored = sessionStorage.getItem("consultationLiveNotes");
+      if (stored) setLiveNotes(stored);
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      sessionStorage.setItem("consultationLiveNotes", liveNotes);
+    } catch {
+      // ignore storage errors
+    }
+  }, [liveNotes]);
+
+  const ensureAudioAccess = useCallback(async () => {
+    if (audioVerified) return true;
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setErrorMsg("Microphone access is not supported on this device.");
+      return false;
+    }
+    setCheckingAudio(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+      setAudioVerified(true);
+      setErrorMsg(null);
+      return true;
+    } catch (err) {
+      console.error("Microphone preflight failed", err);
+      setErrorMsg("Microphone check failed. Please allow browser access to your microphone.");
+      return false;
+    } finally {
+      setCheckingAudio(false);
+    }
+  }, [audioVerified]);
 
   const startRecording = async () => {
+    setErrorMsg(null);
+    setStatus("Checking microphone…");
+    const ready = await ensureAudioAccess();
+    if (!ready) {
+      setStatus("Idle");
+      return;
+    }
     // Prefer Web Speech API if supported
     if (speechSupported) {
       resetSpeech();
       setRecording(true);
       setStatus("Listening...");
+      setElapsed(0);
+      if (timerRef.current) clearInterval(timerRef.current);
+      timerRef.current = (setInterval(() => setElapsed((s) => s + 1), 1000) as unknown) as number;
       startSpeech();
       return;
     }
 
     // Fallback to MediaRecorder + backend transcription
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e: any) {
+      setErrorMsg("Microphone access denied or unavailable.");
+      setStatus("Idle");
+      return;
+    }
     const mr = new MediaRecorder(stream, { mimeType: "audio/webm" });
     chunksRef.current = [];
     mr.ondataavailable = (e) => {
@@ -63,6 +136,7 @@ export default function Consult() {
       const form = new FormData();
       form.append("audio", blob, "consult.webm");
       setStatus("Transcribing...");
+      setErrorMsg(null);
       try {
         const base = process.env.NEXT_PUBLIC_API_BASE_URL;
         if (!base) throw new Error("NEXT_PUBLIC_API_BASE_URL not set");
@@ -70,17 +144,25 @@ export default function Consult() {
         if (!res.ok) throw new Error(`Transcribe failed: ${res.status}`);
         const data = await res.json();
         const text = data?.text ?? "";
+        const audioFilename = data?.audio_filename || "";
+        const audioUrl = data?.audio_url || "";
         sessionStorage.setItem("consultationText", text);
+        sessionStorage.setItem("consultationAudioFilename", audioFilename);
+        if (audioUrl) sessionStorage.setItem("consultationAudioUrl", audioUrl);
+        try { sessionStorage.setItem("consultationLiveNotes", liveNotes); } catch {}
         router.push("/review");
       } catch (e: any) {
         setStatus("Transcription failed");
-        alert(e?.message || "Transcription failed");
+        setErrorMsg(e?.message || "Transcription failed");
       }
     };
     mr.start();
     mediaRecorderRef.current = mr;
     setRecording(true);
     setStatus("Recording...");
+    setElapsed(0);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = (setInterval(() => setElapsed((s) => s + 1), 1000) as unknown) as number;
   };
 
   const stopRecording = () => {
@@ -88,14 +170,19 @@ export default function Consult() {
       stopSpeech();
       setRecording(false);
       setStatus("Processing...");
+      if (timerRef.current) clearInterval(timerRef.current);
       const finalText = [transcript, interimTranscript].filter(Boolean).join(" ").trim();
       sessionStorage.setItem("consultationText", finalText);
+      sessionStorage.removeItem("consultationAudioFilename");
+      sessionStorage.removeItem("consultationAudioUrl");
+      try { sessionStorage.setItem("consultationLiveNotes", liveNotes); } catch {}
       router.push("/review");
       return;
     }
     mediaRecorderRef.current?.stop();
     setRecording(false);
     setStatus("Processing...");
+    if (timerRef.current) clearInterval(timerRef.current);
   };
 
   const combinedTranscript = [transcript, interimTranscript].filter(Boolean).join(" ");
@@ -121,16 +208,58 @@ export default function Consult() {
 
       <div className="flex gap-3">
         {recording ? (
-          <button className="rounded bg-red-600 text-white px-4 py-2" onClick={stopRecording}>
+          <button className="rounded bg-red-600 px-4 py-2 text-white" onClick={stopRecording}>
             Stop {speechSupported ? "Listening" : "Recording"}
           </button>
         ) : (
-          <button className="rounded bg-blue-600 text-white px-4 py-2" onClick={startRecording}>
-            Start {speechSupported ? "Listening" : "Recording"}
+          <button
+            className="rounded bg-blue-600 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
+            onClick={startRecording}
+            disabled={checkingAudio}
+          >
+            {checkingAudio ? "Checking devices…" : `Start ${speechSupported ? "Listening" : "Recording"}`}
           </button>
-        )}
-        <span className="self-center text-gray-600">{status}</span>
+      )}
+      <span className="self-center text-gray-600">{status}</span>
+      {recording ? (
+        <span className="self-center text-gray-800 font-mono">
+          {String(Math.floor(elapsed / 60)).padStart(2, '0')}:{String(elapsed % 60).padStart(2, '0')}
+        </span>
+      ) : null}
+    </div>
+
+      {audioVerified ? (
+        <p className="text-xs text-green-700">Microphone check passed.</p>
+      ) : (
+        <p className="text-xs text-gray-500">We’ll verify your microphone before recording begins.</p>
+      )}
+
+      <div className="space-y-2 rounded-md border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="flex items-center justify-between">
+          <label className="text-sm font-medium text-gray-700">Live notes</label>
+          {recording ? <span className="text-xs text-blue-600">Recording in progress</span> : null}
+        </div>
+        <textarea
+          className="h-32 w-full rounded border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+          value={liveNotes}
+          onChange={(e) => setLiveNotes(e.target.value)}
+          placeholder="Jot down findings, reminders, or follow-ups while the transcript builds."
+        />
+        <p className="text-xs text-gray-500">Notes save automatically and carry over to the review page.</p>
       </div>
+
+      {status === 'Transcribing...' ? (
+        <div className="flex items-center gap-2 text-gray-700">
+          <span className="inline-block h-4 w-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+          <span>Transcribing…</span>
+        </div>
+      ) : null}
+
+      {errorMsg ? (
+        <div className="text-red-700 text-sm">{errorMsg}</div>
+      ) : null}
+
+      {/* Waveform removed */}
 
       {/* Live transcript preview when using Web Speech */}
       {speechSupported && (transcript || interimTranscript) ? (

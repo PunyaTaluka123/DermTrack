@@ -70,8 +70,9 @@ export default function Consult() {
     if (typeof window === "undefined") return;
     try {
       sessionStorage.setItem("consultationLiveNotes", liveNotes);
-    } catch {
-      // ignore storage errors
+      console.log("[Consult] Saved live notes to sessionStorage, length:", liveNotes.length);
+    } catch (e) {
+      console.error("[Consult] Error saving live notes:", e);
     }
   }, [liveNotes]);
 
@@ -152,6 +153,7 @@ export default function Consult() {
         // Read live notes from sessionStorage to get the latest value (avoiding stale closure)
         try {
           const currentLiveNotes = sessionStorage.getItem("consultationLiveNotes") || "";
+          console.log("[Consult] MediaRecorder stop - live notes in sessionStorage:", currentLiveNotes.substring(0, 50), "length:", currentLiveNotes.length);
           sessionStorage.setItem("consultationLiveNotes", currentLiveNotes);
         } catch {}
         router.push("/review");
@@ -182,6 +184,7 @@ export default function Consult() {
       // Read live notes from sessionStorage to ensure we have the latest value
       try {
         const currentLiveNotes = sessionStorage.getItem("consultationLiveNotes") || "";
+        console.log("[Consult] Stop recording - live notes in sessionStorage:", currentLiveNotes.substring(0, 50), "length:", currentLiveNotes.length);
         sessionStorage.setItem("consultationLiveNotes", currentLiveNotes);
       } catch {}
       router.push("/review");

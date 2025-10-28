@@ -15,10 +15,15 @@ export default function Review() {
     const [soapError, setSoapError] = useState<string | null>(null);
     const [soapSections, setSoapSections] = useState<{subjective: string; objective: string; assessment: string; plan: string} | null>(null);
     useEffect(() => {
-        setText(sessionStorage.getItem("consultationText") || "");
+        const transcript = sessionStorage.getItem("consultationText") || "";
+        const notes = sessionStorage.getItem("consultationLiveNotes") || "";
+        console.log("[Review] Loading from sessionStorage:", { transcript: transcript.substring(0, 50), notes: notes.substring(0, 50) });
+        setText(transcript);
         try {
-            setLiveNotes(sessionStorage.getItem("consultationLiveNotes") || "");
-        } catch {
+            setLiveNotes(notes);
+            console.log("[Review] Live notes loaded successfully, length:", notes.length);
+        } catch (e) {
+            console.error("[Review] Error loading live notes:", e);
             setLiveNotes("");
         }
         const init = async () => {
@@ -256,7 +261,14 @@ export default function Review() {
                 <textarea value={text} onChange={(e) => setText(e.target.value)} rows={10} className="w-full rounded border border-gray-300 p-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200" placeholder="Edit the transcript or paste additional details" />
             </div>
             <div className="space-y-2">
-                <label className="block text-sm font-medium text-gray-700">Live notes</label>
+                <div className="flex items-center justify-between">
+                    <label className="block text-sm font-medium text-gray-700">Live notes</label>
+                    {liveNotes.length > 0 ? (
+                        <span className="text-xs text-green-600 font-medium">{liveNotes.length} characters</span>
+                    ) : (
+                        <span className="text-xs text-gray-500">No notes yet</span>
+                    )}
+                </div>
                 <textarea value={liveNotes} onChange={(e) => setLiveNotes(e.target.value)} rows={6} className="w-full rounded border border-gray-300 p-2 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200" placeholder="Notes captured during the consultation. These stay synced from the consult page." />
             </div>
             <div className="space-y-2">

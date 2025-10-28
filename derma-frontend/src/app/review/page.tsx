@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export default function Review() {
     const [text, setText] = useState("");
@@ -14,6 +14,8 @@ export default function Review() {
     const [soapLoading, setSoapLoading] = useState(false);
     const [soapError, setSoapError] = useState<string | null>(null);
     const [soapSections, setSoapSections] = useState<{subjective: string; objective: string; assessment: string; plan: string} | null>(null);
+    const isInitialMount = useRef(true);
+
     useEffect(() => {
         const transcript = sessionStorage.getItem("consultationText") || "";
         const notes = sessionStorage.getItem("consultationLiveNotes") || "";
@@ -45,10 +47,16 @@ export default function Review() {
     }, []);
 
     useEffect(() => {
+        // Skip auto-save on initial mount to prevent overwriting loaded notes
+        if (isInitialMount.current) {
+            isInitialMount.current = false;
+            return;
+        }
         try {
             sessionStorage.setItem("consultationLiveNotes", liveNotes);
-        } catch {
-            // ignore storage issues
+            console.log("[Review] Auto-saved live notes to sessionStorage, length:", liveNotes.length);
+        } catch (e) {
+            console.error("[Review] Error auto-saving live notes:", e);
         }
     }, [liveNotes]);
 

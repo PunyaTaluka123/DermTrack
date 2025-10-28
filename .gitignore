@@ -1,5 +1,9 @@
 node_modules/
 .env
-.env.example
 policies/
+
+# Database files
+*.db
+*.db.sqlite.backup
+*.backup
 

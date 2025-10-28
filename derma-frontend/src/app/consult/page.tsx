@@ -149,7 +149,11 @@ export default function Consult() {
         sessionStorage.setItem("consultationText", text);
         sessionStorage.setItem("consultationAudioFilename", audioFilename);
         if (audioUrl) sessionStorage.setItem("consultationAudioUrl", audioUrl);
-        try { sessionStorage.setItem("consultationLiveNotes", liveNotes); } catch {}
+        // Read live notes from sessionStorage to get the latest value (avoiding stale closure)
+        try {
+          const currentLiveNotes = sessionStorage.getItem("consultationLiveNotes") || "";
+          sessionStorage.setItem("consultationLiveNotes", currentLiveNotes);
+        } catch {}
         router.push("/review");
       } catch (e: any) {
         setStatus("Transcription failed");
@@ -175,7 +179,11 @@ export default function Consult() {
       sessionStorage.setItem("consultationText", finalText);
       sessionStorage.removeItem("consultationAudioFilename");
       sessionStorage.removeItem("consultationAudioUrl");
-      try { sessionStorage.setItem("consultationLiveNotes", liveNotes); } catch {}
+      // Read live notes from sessionStorage to ensure we have the latest value
+      try {
+        const currentLiveNotes = sessionStorage.getItem("consultationLiveNotes") || "";
+        sessionStorage.setItem("consultationLiveNotes", currentLiveNotes);
+      } catch {}
       router.push("/review");
       return;
     }

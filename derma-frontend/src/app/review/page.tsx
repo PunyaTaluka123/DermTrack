@@ -174,9 +174,13 @@ export default function Review() {
     };
 
     const applySoapToText = () => {
-        if (!soapNote) return;
-        setText(soapNote);
-    };
+    if (!soapNote) return;
+    const originalTranscript = text;
+    const combinedText = originalTranscript.trim()
+        ? `${soapNote}\n\n---\n\nOriginal Transcript:\n${originalTranscript}`
+        : soapNote;
+    setText(combinedText);
+};
 
     const save = async () => {
         const consultation_id = null;

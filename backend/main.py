@@ -5,7 +5,7 @@ from typing import Optional, List
 import uvicorn
 import os
 from datetime import datetime, timedelta
-import google.generativeai as genai
+from google import genai
 import json
 
 # Database and auth imports
@@ -34,6 +34,7 @@ SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "lax").lower()
 if SESSION_COOKIE_SAMESITE not in {"lax", "strict", "none"}:
     SESSION_COOKIE_SAMESITE = "lax"
 
+
 # Optional S3 audio storage
 S3_ENABLED = os.getenv("S3_ENABLED", "false").lower() in ("1", "true", "yes")
 S3_BUCKET = os.getenv("S3_BUCKET", "")
@@ -43,8 +44,7 @@ S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "")
 
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+
 
 app = FastAPI(title="DermaTrack API")
 
@@ -515,9 +515,6 @@ def soap_autofill(payload: SoapNotesIn, user: User = Depends(get_current_user)) 
     """
     Generate SOAP notes from transcript and live notes using Gemini API.
     """
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured")
-
     # Combine transcript and notes for context
     combined_input = ""
     if payload.transcript.strip():
@@ -527,12 +524,11 @@ def soap_autofill(payload: SoapNotesIn, user: User = Depends(get_current_user)) 
 
     if not combined_input.strip():
         raise HTTPException(status_code=400, detail="Both transcript and notes are empty")
-
+    print("Combined Input for Gemini:", combined_input)
     # Create the prompt for Gemini
     prompt = f"""You are a medical documentation assistant helping to organize consultation notes into SOAP format (Subjective, Objective, Assessment, Plan).
 
 Below is the information from a dermatology consultation:
-
 {combined_input}
 
 Please extract and organize this information into the following four SOAP sections. Be concise and professional. If a section has no relevant information, write "No information provided" for that section.
@@ -555,14 +551,16 @@ Respond ONLY with valid JSON in this exact format:
 
     try:
         # Initialize Gemini model
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        client = genai.Client(api_key="REDACTED_GEMINI_API_KEY")
 
-        # Generate content
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+        model="gemini-2.5-flash",
+    contents=prompt
+)
 
         # Extract the text from response
         response_text = response.text.strip()
-
+        print("Gemini Response Text:", response_text)
         # Try to extract JSON from the response
         # Sometimes Gemini wraps JSON in markdown code blocks
         if response_text.startswith("```json"):

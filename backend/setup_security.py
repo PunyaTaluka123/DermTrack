@@ -229,8 +229,9 @@ def validate_setup():
     # Check database connection
     try:
         from main import SessionLocal
+        from sqlalchemy import text
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         db.close()
         print("✓ Database connection OK")
     except Exception as e:

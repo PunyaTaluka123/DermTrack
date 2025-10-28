@@ -17,6 +17,10 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import secrets
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
+
 # ----------------------------------------------------
 # Config
 # ----------------------------------------------------

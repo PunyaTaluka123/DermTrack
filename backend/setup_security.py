@@ -26,6 +26,19 @@ from datetime import datetime
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    env_path = Path(__file__).parent / '.env'
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✓ Loaded environment from {env_path}")
+    else:
+        print(f"⚠️  No .env file found at {env_path}")
+except ImportError:
+    print("⚠️  python-dotenv not installed. Install with: pip install python-dotenv")
+    print("   Proceeding without .env file loading...")
+
 def setup_database(force=False):
     """Create security database tables"""
     print("\n" + "="*60)

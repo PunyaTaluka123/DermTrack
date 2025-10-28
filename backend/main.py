@@ -5,6 +5,8 @@ from typing import Optional, List
 import uvicorn
 import os
 from datetime import datetime, timedelta
+import google.generativeai as genai
+import json
 
 # Database and auth imports
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, create_engine, UniqueConstraint
@@ -38,6 +40,11 @@ S3_BUCKET = os.getenv("S3_BUCKET", "")
 S3_REGION = os.getenv("AWS_REGION", os.getenv("S3_REGION", ""))
 S3_PREFIX = os.getenv("S3_PREFIX", "dermatrack/audio/")
 S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "")
+
+# Gemini API configuration
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 app = FastAPI(title="DermaTrack API")
 
@@ -247,6 +254,19 @@ class PatientOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+# SOAP Notes Schemas
+class SoapNotesIn(BaseModel):
+    transcript: str
+    notes: str
+
+
+class SoapNotesOut(BaseModel):
+    subjective: str
+    objective: str
+    assessment: str
+    plan: str
 
 
 # ----------------------------------------------------
@@ -488,6 +508,93 @@ def suggest_questions(payload: SuggestIn) -> SuggestOut:
         return SuggestOut(suggestions=suggestions)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Suggestion error: {str(e)}")
+
+
+@app.post("/soap_autofill", response_model=SoapNotesOut)
+def soap_autofill(payload: SoapNotesIn, user: User = Depends(get_current_user)) -> SoapNotesOut:
+    """
+    Generate SOAP notes from transcript and live notes using Gemini API.
+    """
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured")
+
+    # Combine transcript and notes for context
+    combined_input = ""
+    if payload.transcript.strip():
+        combined_input += f"TRANSCRIPT:\n{payload.transcript.strip()}\n\n"
+    if payload.notes.strip():
+        combined_input += f"CLINICIAN NOTES:\n{payload.notes.strip()}\n\n"
+
+    if not combined_input.strip():
+        raise HTTPException(status_code=400, detail="Both transcript and notes are empty")
+
+    # Create the prompt for Gemini
+    prompt = f"""You are a medical documentation assistant helping to organize consultation notes into SOAP format (Subjective, Objective, Assessment, Plan).
+
+Below is the information from a dermatology consultation:
+
+{combined_input}
+
+Please extract and organize this information into the following four SOAP sections. Be concise and professional. If a section has no relevant information, write "No information provided" for that section.
+
+Return your response as a JSON object with these exact keys: "subjective", "objective", "assessment", "plan"
+
+SOAP Section Guidelines:
+- Subjective: Patient's chief complaint, symptoms, history as described by the patient (what they say)
+- Objective: Observable findings, clinical observations, measurements, examination results (what you see/measure)
+- Assessment: Clinical diagnosis, impression, or differential diagnoses
+- Plan: Treatment plan, medications, follow-up instructions, recommendations
+
+Respond ONLY with valid JSON in this exact format:
+{{
+  "subjective": "content here",
+  "objective": "content here",
+  "assessment": "content here",
+  "plan": "content here"
+}}"""
+
+    try:
+        # Initialize Gemini model
+        model = genai.GenerativeModel('gemini-1.5-flash')
+
+        # Generate content
+        response = model.generate_content(prompt)
+
+        # Extract the text from response
+        response_text = response.text.strip()
+
+        # Try to extract JSON from the response
+        # Sometimes Gemini wraps JSON in markdown code blocks
+        if response_text.startswith("```json"):
+            response_text = response_text[7:]
+        if response_text.startswith("```"):
+            response_text = response_text[3:]
+        if response_text.endswith("```"):
+            response_text = response_text[:-3]
+        response_text = response_text.strip()
+
+        # Parse JSON response
+        try:
+            soap_data = json.loads(response_text)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, try to extract sections manually
+            raise HTTPException(status_code=500, detail="Failed to parse Gemini response as JSON")
+
+        # Validate that all required keys are present
+        required_keys = ["subjective", "objective", "assessment", "plan"]
+        for key in required_keys:
+            if key not in soap_data:
+                soap_data[key] = "No information provided"
+
+        return SoapNotesOut(
+            subjective=soap_data.get("subjective", "No information provided"),
+            objective=soap_data.get("objective", "No information provided"),
+            assessment=soap_data.get("assessment", "No information provided"),
+            plan=soap_data.get("plan", "No information provided")
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating SOAP notes: {str(e)}")
 
 
 @app.get("/notes", response_model=List[NoteOut])

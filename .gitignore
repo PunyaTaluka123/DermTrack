@@ -7,3 +7,12 @@ policies/
 *.db.sqlite.backup
 *.backup
 
+# Sensitive data storage (never commit!)
+backend/data_storage/raw_data/
+backend/data_storage/processed_data/
+backend/data_storage/metadata/
+backend/data_storage/audit_logs/
+backend/keys/
+*.key
+*.pem
+

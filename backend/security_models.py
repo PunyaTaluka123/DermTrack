@@ -58,6 +58,9 @@ class ConsentRecord(Base):
     doctor = relationship("User", foreign_keys=[doctor_id])
 
 
+# Note: ConsultationConsent model is defined in main.py to avoid circular imports
+
+
 # ============================================================================
 # Audit Logging
 # ============================================================================

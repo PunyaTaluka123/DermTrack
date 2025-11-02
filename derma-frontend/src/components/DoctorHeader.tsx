@@ -52,6 +52,13 @@ export default function DoctorHeader() {
           </button>
           <button
             type="button"
+            onClick={() => router.push("/admin/consent-logs")}
+            className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+          >
+            Consent Logs
+          </button>
+          <button
+            type="button"
             onClick={handleLogout}
             className="text-sm font-medium text-gray-600 underline hover:text-gray-800"
           >

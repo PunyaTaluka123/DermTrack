@@ -12,6 +12,7 @@ export default function Consult() {
   const [audioVerified, setAudioVerified] = useState(false);
   const [elapsed, setElapsed] = useState(0); // seconds
   const [liveNotes, setLiveNotes] = useState("");
+  const [consentGiven, setConsentGiven] = useState(false);
   const timerRef = useRef<number | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -100,12 +101,22 @@ export default function Consult() {
 
   const startRecording = async () => {
     setErrorMsg(null);
+
+    // Check consent first
+    if (!consentGiven) {
+      setErrorMsg("Please confirm patient consent before starting recording.");
+      return;
+    }
+
     setStatus("Checking microphone…");
     const ready = await ensureAudioAccess();
     if (!ready) {
       setStatus("Idle");
       return;
     }
+
+    // Store consent timestamp for later submission
+    sessionStorage.setItem("consentTimestamp", new Date().toISOString());
     // Prefer Web Speech API if supported
     if (speechSupported) {
       resetSpeech();
@@ -217,6 +228,35 @@ export default function Consult() {
         <p className="text-sm text-red-700">Speech error: {speechError}</p>
       ) : null}
 
+      {/* Patient Consent Section */}
+      <div className="space-y-3 rounded-lg border-2 border-blue-200 bg-blue-50 p-4">
+        <h3 className="text-lg font-semibold text-gray-800">Patient Consent Required</h3>
+        <div className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            id="consent"
+            checked={consentGiven}
+            onChange={(e) => setConsentGiven(e.target.checked)}
+            className="mt-1 h-5 w-5 cursor-pointer rounded border-gray-300 text-blue-600 focus:ring-2 focus:ring-blue-500"
+          />
+          <label htmlFor="consent" className="cursor-pointer text-sm text-gray-700">
+            I confirm that I have obtained verbal consent from the patient to record this consultation
+            and process their medical information. The patient has been informed about:
+            <ul className="mt-2 ml-4 list-disc space-y-1 text-xs text-gray-600">
+              <li>Audio recording and transcription of this consultation</li>
+              <li>Storage and processing of their medical data</li>
+              <li>Their right to withdraw consent at any time</li>
+              <li>Data retention and deletion policies</li>
+            </ul>
+          </label>
+        </div>
+        {!consentGiven && (
+          <p className="text-xs text-amber-700 font-medium">
+            ⚠ Recording cannot start without patient consent confirmation
+          </p>
+        )}
+      </div>
+
       <div className="flex gap-3">
         {recording ? (
           <button className="rounded bg-red-600 px-4 py-2 text-white" onClick={stopRecording}>
@@ -226,7 +266,7 @@ export default function Consult() {
           <button
             className="rounded bg-blue-600 px-4 py-2 text-white disabled:cursor-not-allowed disabled:opacity-60"
             onClick={startRecording}
-            disabled={checkingAudio}
+            disabled={checkingAudio || !consentGiven}
           >
             {checkingAudio ? "Checking devices…" : `Start ${speechSupported ? "Listening" : "Recording"}`}
           </button>

@@ -13,7 +13,7 @@ from slowapi.errors import RateLimitExceeded
 import bleach
 
 # Database and auth imports
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, create_engine, UniqueConstraint
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, create_engine, UniqueConstraint, Boolean
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session, joinedload
 from passlib.context import CryptContext
 from jose import jwt, JWTError
@@ -167,6 +167,37 @@ class Patient(Base):
     __table_args__ = (UniqueConstraint('user_id', 'name', name='uq_patient_user_name'),)
 
 
+class ConsultationConsent(Base):
+    """Records consent confirmation for specific consultation recording/transcription"""
+    __tablename__ = "consultation_consents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    consultation_id = Column(Integer, ForeignKey("consultations.id"), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True, index=True)
+
+    # Consent details
+    consent_given = Column(Boolean, default=False, nullable=False)
+    consent_timestamp = Column(DateTime, nullable=False, index=True)
+    consent_method = Column(String(100), default="verbal", nullable=False)
+
+    # Audit information
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+
+    # Optional withdrawal tracking
+    withdrawn = Column(Boolean, default=False, nullable=False, index=True)
+    withdrawn_at = Column(DateTime, nullable=True)
+
+    # Additional notes
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    user = relationship("User")
+    consultation = relationship("Consultation", backref="consent")
+    patient = relationship("Patient")
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 
@@ -299,6 +330,8 @@ class ConsultationIn(BaseModel):
     transcript: Optional[str] = None
     audio_filename: Optional[str] = None  # stored filename under media/audio
     audio_url: Optional[str] = None       # absolute URL (e.g., S3)
+    consent_given: Optional[bool] = False
+    consent_timestamp: Optional[str] = None
 
 
 class ConsultationOut(BaseModel):
@@ -308,6 +341,23 @@ class ConsultationOut(BaseModel):
     transcript: Optional[str]
     audio_url: Optional[str]
     created_at: str
+    consent_given: Optional[bool] = None
+
+    class Config:
+        orm_mode = True
+
+
+class ConsentLogOut(BaseModel):
+    id: int
+    consultation_id: int
+    user_id: int
+    patient_id: Optional[int]
+    patient_name: Optional[str]
+    consent_given: bool
+    consent_timestamp: str
+    consent_method: str
+    ip_address: Optional[str]
+    withdrawn: bool
 
     class Config:
         orm_mode = True
@@ -750,7 +800,7 @@ def delete_note(note_id: int, user: User = Depends(get_current_user), db: Sessio
 
 
 @app.post("/consultations", response_model=ConsultationOut)
-def create_consultation(payload: ConsultationIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_consultation(payload: ConsultationIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from sqlalchemy.exc import IntegrityError
     resolved_audio_url = payload.audio_url or None
     audio_path_str = None
@@ -791,6 +841,40 @@ def create_consultation(payload: ConsultationIn, user: User = Depends(get_curren
         audio_url=resolved_audio_url,
     )
     db.add(c)
+    db.flush()  # Get consultation ID before creating consent record
+
+    # Create consent record if consent data provided
+    if payload.consent_given and payload.consent_timestamp:
+        consent_ts = datetime.fromisoformat(payload.consent_timestamp.replace('Z', '+00:00'))
+        consent = ConsultationConsent(
+            consultation_id=c.id,
+            user_id=user.id,
+            patient_id=pid,
+            consent_given=payload.consent_given,
+            consent_timestamp=consent_ts,
+            consent_method="verbal",
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("User-Agent"),
+        )
+        db.add(consent)
+        db.flush()  # Get consent ID for audit log
+
+        # Log consent action to audit trail
+        try:
+            from security.audit import AuditLogger
+            patient_ref = f"patient_{pid}" if pid else "unknown"
+            AuditLogger.log_consent_action(
+                db=db,
+                user_id=user.id,
+                patient_ref=patient_ref,
+                action="consent_granted",
+                consent_id=str(consent.id),
+                request=request
+            )
+        except Exception as e:
+            # Don't fail the consultation creation if audit logging fails
+            print(f"Warning: Failed to log consent action: {e}")
+
     db.commit()
     db.refresh(c)
     pname = None
@@ -804,6 +888,7 @@ def create_consultation(payload: ConsultationIn, user: User = Depends(get_curren
         transcript=c.transcript,
         audio_url=c.audio_url or (f"/media/audio/{Path(c.audio_path).name}" if c.audio_path else None),
         created_at=c.created_at.isoformat() + "Z",
+        consent_given=payload.consent_given,
     )
 
 
@@ -821,6 +906,11 @@ def list_consultations(user: User = Depends(get_current_user), db: Session = Dep
         pname = None
         if c.patient_rel:
             pname = c.patient_rel.name
+
+        # Check if consent exists for this consultation
+        consent = db.query(ConsultationConsent).filter(ConsultationConsent.consultation_id == c.id).first()
+        consent_given = consent.consent_given if consent else None
+
         out.append(ConsultationOut(
             id=c.id,
             patient_id=c.patient_id,
@@ -828,8 +918,128 @@ def list_consultations(user: User = Depends(get_current_user), db: Session = Dep
             transcript=c.transcript,
             audio_url=audio_url,
             created_at=c.created_at.isoformat() + "Z",
+            consent_given=consent_given,
         ))
     return out
+
+
+# ============================================================================
+# Consent Logging Endpoints
+# ============================================================================
+
+@app.get("/consent-logs", response_model=List[ConsentLogOut])
+def get_my_consent_logs(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all consent logs for the current user (doctor's own consultations)"""
+    consents = db.query(ConsultationConsent)\
+        .filter(ConsultationConsent.user_id == user.id)\
+        .order_by(ConsultationConsent.consent_timestamp.desc())\
+        .all()
+
+    out: List[ConsentLogOut] = []
+    for consent in consents:
+        pname = None
+        if consent.patient_id:
+            patient = db.query(Patient).filter(Patient.id == consent.patient_id).first()
+            pname = patient.name if patient else None
+
+        out.append(ConsentLogOut(
+            id=consent.id,
+            consultation_id=consent.consultation_id,
+            user_id=consent.user_id,
+            patient_id=consent.patient_id,
+            patient_name=pname,
+            consent_given=consent.consent_given,
+            consent_timestamp=consent.consent_timestamp.isoformat() + "Z",
+            consent_method=consent.consent_method,
+            ip_address=consent.ip_address,
+            withdrawn=consent.withdrawn,
+        ))
+    return out
+
+
+@app.get("/admin/consent-logs", response_model=List[ConsentLogOut])
+def get_all_consent_logs(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Admin endpoint: Get all consent logs across all users"""
+    # Note: In production, add RBAC check here to ensure user has admin role
+    # For now, any authenticated user can access this (you may want to restrict)
+
+    # Log admin access to consent logs
+    try:
+        from security.audit import AuditLogger
+        AuditLogger.log(
+            db=db,
+            action="read",
+            resource_type="consent_logs",
+            user_id=user.id,
+            resource_id="all",
+            request=request,
+            success=True,
+            metadata={"admin_access": True}
+        )
+    except Exception as e:
+        print(f"Warning: Failed to log admin consent access: {e}")
+
+    consents = db.query(ConsultationConsent)\
+        .order_by(ConsultationConsent.consent_timestamp.desc())\
+        .all()
+
+    out: List[ConsentLogOut] = []
+    for consent in consents:
+        pname = None
+        if consent.patient_id:
+            patient = db.query(Patient).filter(Patient.id == consent.patient_id).first()
+            pname = patient.name if patient else None
+
+        out.append(ConsentLogOut(
+            id=consent.id,
+            consultation_id=consent.consultation_id,
+            user_id=consent.user_id,
+            patient_id=consent.patient_id,
+            patient_name=pname,
+            consent_given=consent.consent_given,
+            consent_timestamp=consent.consent_timestamp.isoformat() + "Z",
+            consent_method=consent.consent_method,
+            ip_address=consent.ip_address,
+            withdrawn=consent.withdrawn,
+        ))
+    return out
+
+
+@app.get("/consultations/{consultation_id}/consent", response_model=ConsentLogOut)
+def get_consultation_consent(consultation_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get consent record for a specific consultation"""
+    # Verify the consultation belongs to the user
+    consultation = db.query(Consultation).filter(
+        Consultation.id == consultation_id,
+        Consultation.user_id == user.id
+    ).first()
+    if not consultation:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+
+    consent = db.query(ConsultationConsent).filter(
+        ConsultationConsent.consultation_id == consultation_id
+    ).first()
+
+    if not consent:
+        raise HTTPException(status_code=404, detail="Consent record not found")
+
+    pname = None
+    if consent.patient_id:
+        patient = db.query(Patient).filter(Patient.id == consent.patient_id).first()
+        pname = patient.name if patient else None
+
+    return ConsentLogOut(
+        id=consent.id,
+        consultation_id=consent.consultation_id,
+        user_id=consent.user_id,
+        patient_id=consent.patient_id,
+        patient_name=pname,
+        consent_given=consent.consent_given,
+        consent_timestamp=consent.consent_timestamp.isoformat() + "Z",
+        consent_method=consent.consent_method,
+        ip_address=consent.ip_address,
+        withdrawn=consent.withdrawn,
+    )
 
 
 @app.post("/transcribe")

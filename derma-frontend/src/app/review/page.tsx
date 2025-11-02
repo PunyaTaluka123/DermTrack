@@ -207,13 +207,22 @@ export default function Review() {
                 const p = await pRes.json();
                 selectedId = p.id;
             }
-            // Create consultation first
+            // Create consultation first with consent data
             const audio_filename = sessionStorage.getItem("consultationAudioFilename") || null;
+            const consent_timestamp = sessionStorage.getItem("consentTimestamp") || null;
             const cRes = await fetch(base + "/consultations", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 credentials: "include",
-                body: JSON.stringify({ patient_id: selectedId, patient_name: (!selectedId && newPatient.trim()) ? newPatient.trim() : null, transcript: text, audio_filename, audio_url: sessionStorage.getItem("consultationAudioUrl") || null })
+                body: JSON.stringify({
+                    patient_id: selectedId,
+                    patient_name: (!selectedId && newPatient.trim()) ? newPatient.trim() : null,
+                    transcript: text,
+                    audio_filename,
+                    audio_url: sessionStorage.getItem("consultationAudioUrl") || null,
+                    consent_given: consent_timestamp ? true : false,
+                    consent_timestamp: consent_timestamp
+                })
             });
             if (cRes.status === 401) {
                 alert("Please login to save");
@@ -227,6 +236,7 @@ export default function Review() {
             const consultation = await cRes.json();
             try { sessionStorage.removeItem('selectedPatientId'); } catch {}
             try { sessionStorage.removeItem('consultationLiveNotes'); } catch {}
+            try { sessionStorage.removeItem('consentTimestamp'); } catch {}
             const res = await fetch(base + "/notes", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },

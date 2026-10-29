@@ -24,8 +24,8 @@ export default function Login() {
       });
       if (!res.ok) throw new Error((await res.json())?.detail || "Login failed");
       router.replace("/dashboard");
-    } catch (e: any) {
-      setError(e?.message || "Login failed");
+    } catch (e) {
+      setError((e as Error)?.message || "Login failed");
     } finally {
       setLoading(false);
     }

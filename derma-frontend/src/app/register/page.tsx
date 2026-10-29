@@ -24,8 +24,8 @@ export default function Register() {
       });
       if (!res.ok) throw new Error((await res.json())?.detail || "Registration failed");
       router.replace("/dashboard");
-    } catch (e: any) {
-      setError(e?.message || "Registration failed");
+    } catch (e) {
+      setError((e as Error)?.message || "Registration failed");
     } finally {
       setLoading(false);
     }

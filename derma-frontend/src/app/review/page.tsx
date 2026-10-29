@@ -34,7 +34,7 @@ export default function Review() {
                 const res = await fetch(`${base}/patients`, { credentials: 'include' });
                 if (res.ok) {
                     const items = await res.json();
-                    setPatients(items.map((p:any)=>({id:p.id, name:p.name})));
+                    setPatients(items.map((p: { id: number; name: string })=>({id:p.id, name:p.name})));
                     const preset = sessionStorage.getItem('selectedPatientId');
                     if (preset) {
                         const n = Number(preset);
@@ -99,8 +99,8 @@ export default function Review() {
                 } else {
                     setSugError('Could not load suggestions');
                 }
-            } catch (e:any) {
-                if (e?.name !== 'AbortError') setSugError('Could not load suggestions');
+            } catch (e) {
+                if ((e as Error)?.name !== 'AbortError') setSugError('Could not load suggestions');
             } finally {
                 setLoadingSug(false);
             }
@@ -166,8 +166,8 @@ export default function Review() {
                 assessment: data?.assessment ?? '',
                 plan: data?.plan ?? '',
             });
-        } catch (e:any) {
-            setSoapError(e?.message || 'Failed to format notes');
+        } catch (e) {
+            setSoapError((e as Error)?.message || 'Failed to format notes');
         } finally {
             setSoapLoading(false);
         }

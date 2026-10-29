@@ -56,8 +56,8 @@ export default function Dashboard() {
       setPatients(await pRes.json());
       setConsultations(await cRes.json());
       setNotes(await nRes.json());
-    } catch (e:any) {
-      setError(e?.message || 'Failed to load');
+    } catch (e) {
+      setError((e as Error)?.message || 'Failed to load');
     } finally {
       setLoading(false);
     }

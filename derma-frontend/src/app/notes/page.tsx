@@ -34,8 +34,8 @@ export default function Notes() {
       const cRes = await fetch(`${base}/consultations`, { credentials: "include" });
       if (!cRes.ok) throw new Error("Failed to fetch consultations");
       setConsultations(await cRes.json());
-    } catch (e: any) {
-      setError(e?.message || "Failed to load");
+    } catch (e) {
+      setError((e as Error)?.message || "Failed to load");
     } finally {
       setLoading(false);
     }

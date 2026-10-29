@@ -53,8 +53,8 @@ export default function AdminConsentLogs() {
 
         const data = await res.json();
         setLogs(data);
-      } catch (e: any) {
-        setError(e?.message || "Failed to load consent logs");
+      } catch (e) {
+        setError((e as Error)?.message || "Failed to load consent logs");
       } finally {
         setLoading(false);
       }

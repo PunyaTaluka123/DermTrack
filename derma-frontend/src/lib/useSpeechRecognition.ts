@@ -1,4 +1,5 @@
 "use client";
+/* eslint-disable @typescript-eslint/no-explicit-any -- the Web Speech API has no TypeScript DOM types */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 

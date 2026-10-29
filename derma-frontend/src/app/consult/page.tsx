@@ -1,10 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSpeechRecognition } from "@/lib/useSpeechRecognition";
 
-export default function Consult() {
+// useSearchParams() needs a Suspense boundary for static prerendering in Next 15.
+export default function ConsultPage() {
+  return (
+    <Suspense>
+      <Consult />
+    </Suspense>
+  );
+}
+
+function Consult() {
   const [recording, setRecording] = useState(false);
   const [status, setStatus] = useState("Idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -133,7 +142,7 @@ export default function Consult() {
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e: any) {
+    } catch (e) {
       setErrorMsg("Microphone access denied or unavailable.");
       setStatus("Idle");
       return;
@@ -168,9 +177,9 @@ export default function Consult() {
           sessionStorage.setItem("consultationLiveNotes", currentLiveNotes);
         } catch {}
         router.push("/review");
-      } catch (e: any) {
+      } catch (e) {
         setStatus("Transcription failed");
-        setErrorMsg(e?.message || "Transcription failed");
+        setErrorMsg((e as Error)?.message || "Transcription failed");
       }
     };
     mr.start();
@@ -213,7 +222,7 @@ export default function Consult() {
     <main className="max-w-xl mx-auto py-10 px-4 space-y-6">
       <h2 className="text-2xl font-semibold">Consultation</h2>
       <p className="text-gray-600">
-        Describe your skin concerns and symptoms. Click "Start Recording" to begin.
+        Describe your skin concerns and symptoms. Click &quot;Start Recording&quot; to begin.
       </p>
 
       {speechSupported ? (

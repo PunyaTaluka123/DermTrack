@@ -16,3 +16,10 @@ backend/keys/
 *.key
 *.pem
 
+
+# Python / editor / local tooling
+__pycache__/
+*.pyc
+.venv/
+media/
+.claude/

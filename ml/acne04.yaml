@@ -1,0 +1,8 @@
+# ACNE04 (Roboflow export, CC BY 4.0): https://universe.roboflow.com/andrei-dore-5lz05/acne04
+# Paths are relative to this file. Run yolo_bbox_to_polygon.py first so YOLOv8-seg can read the labels.
+train: data/acne04/train/images
+val: data/acne04/valid/images
+test: data/acne04/test/images
+
+nc: 1
+names: ["acne"]

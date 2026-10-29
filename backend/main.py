@@ -147,6 +147,7 @@ class ConsultationConsent(Base):
 
 
 def init_db():
+    import security_models  # noqa: F401  registers audit/consent/RBAC tables on Base
     Base.metadata.create_all(bind=engine)
 
 

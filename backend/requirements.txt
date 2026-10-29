@@ -11,3 +11,6 @@ psycopg2-binary==2.9.9
 cryptography==42.0.5
 requests==2.32.3
 google-generativeai==0.8.3
+python-dotenv==1.0.0
+slowapi==0.1.9
+bleach==6.1.0

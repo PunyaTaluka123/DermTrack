@@ -58,6 +58,9 @@ class ConsentRecord(Base):
     doctor = relationship("User", foreign_keys=[doctor_id])
 
 
+# Note: ConsultationConsent model is defined in main.py to avoid circular imports
+
+
 # ============================================================================
 # Audit Logging
 # ============================================================================
@@ -76,7 +79,7 @@ class AuditLog(Base):
     user_agent = Column(String(512), nullable=True)
     success = Column(Boolean, nullable=False, default=True)
     error_message = Column(Text, nullable=True)
-    metadata = Column(Text, nullable=True)  # JSON string for additional context
+    additional_metadata = Column(Text, nullable=True)  # JSON string for additional context
 
     # Relationships
     user = relationship("User", foreign_keys=[user_id])

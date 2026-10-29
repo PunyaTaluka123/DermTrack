@@ -83,7 +83,7 @@ class AuditLogger:
             user_agent=user_agent,
             success=success,
             error_message=error_message,
-            metadata=metadata_json
+            additional_metadata=metadata_json
         )
 
         db.add(log_entry)

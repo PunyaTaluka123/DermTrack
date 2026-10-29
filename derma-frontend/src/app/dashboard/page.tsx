@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Patient = { id: number; name: string; mrn?: string|null; dob?: string|null; contact?: string|null; created_at: string };
-type Consultation = { id: number; patient_id?: number|null; patient_name?: string|null; transcript?: string|null; audio_url?: string|null; created_at: string };
+type Consultation = { id: number; patient_id?: number|null; patient_name?: string|null; transcript?: string|null; audio_url?: string|null; created_at: string; consent_given?: boolean|null };
 type Note = { id: number; text: string; consultation_id?: number | null; updated_at: string };
 type PatientWithCount = Patient & { consultationCount: number };
 
@@ -291,11 +291,27 @@ export default function Dashboard() {
           <ul className="space-y-3">
             {consultations.map(c => (
               <li key={c.id} className="border rounded p-3">
-                <p className="text-sm font-medium text-gray-800" title={c.transcript || undefined}>
-                  {summarizeTranscript(c.transcript)}
-                </p>
-                <div className="text-xs text-gray-500">Recorded {new Date(c.created_at).toLocaleString()}</div>
-                <div className="text-sm">Patient: {c.patient_name || '—'}</div>
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-800" title={c.transcript || undefined}>
+                      {summarizeTranscript(c.transcript)}
+                    </p>
+                    <div className="text-xs text-gray-500">Recorded {new Date(c.created_at).toLocaleString()}</div>
+                    <div className="text-sm">Patient: {c.patient_name || '—'}</div>
+                  </div>
+                  {c.consent_given !== undefined && c.consent_given !== null && (
+                    <span
+                      className={`text-xs font-semibold px-2 py-1 rounded ${
+                        c.consent_given
+                          ? 'bg-green-100 text-green-800'
+                          : 'bg-red-100 text-red-800'
+                      }`}
+                      title={c.consent_given ? 'Patient consent obtained' : 'No consent recorded'}
+                    >
+                      {c.consent_given ? '✓ Consent' : '✗ No Consent'}
+                    </span>
+                  )}
+                </div>
                 {c.audio_url ? (
                   <audio controls className="mt-2 w-full" src={c.audio_url.startsWith('http') ? c.audio_url : `${base}${c.audio_url}`}></audio>
                 ) : (

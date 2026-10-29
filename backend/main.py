@@ -7,53 +7,38 @@ import os
 from datetime import datetime, timedelta
 from google import genai
 import json
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import bleach
 
 # Database and auth imports
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, create_engine, UniqueConstraint
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, create_engine, UniqueConstraint, Boolean
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session, joinedload
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 import secrets
 
-# ----------------------------------------------------
-# Config
-# ----------------------------------------------------
-TRANSCRIBE_BACKEND = os.getenv("TRANSCRIBE_BACKEND", "local").lower()
-RAW_FRONTEND_ORIGINS = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
-FRONTEND_ORIGINS = [origin.strip() for origin in RAW_FRONTEND_ORIGINS.split(",") if origin.strip()]
-if not FRONTEND_ORIGINS:
-    FRONTEND_ORIGINS = ["http://localhost:3000"]
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-change-me")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "120"))
-SECURE_COOKIES = os.getenv("SECURE_COOKIES", "false").lower() in ("1", "true", "yes")
-SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN") or None
-SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "lax").lower()
-if SESSION_COOKIE_SAMESITE not in {"lax", "strict", "none"}:
-    SESSION_COOKIE_SAMESITE = "lax"
-
-
-# Optional S3 audio storage
-S3_ENABLED = os.getenv("S3_ENABLED", "false").lower() in ("1", "true", "yes")
-S3_BUCKET = os.getenv("S3_BUCKET", "")
-S3_REGION = os.getenv("AWS_REGION", os.getenv("S3_REGION", ""))
-S3_PREFIX = os.getenv("S3_PREFIX", "dermatrack/audio/")
-S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "")
-
-# Gemini API configuration
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-
+from config import *
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 app = FastAPI(title="DermaTrack API")
+
+# Setup rate limiting
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],  # Restrict to specific methods
+    allow_headers=["Content-Type", "Authorization", "Cookie"],  # Restrict headers
 )
 Path("media/audio").mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory="media"), name="media")
@@ -62,7 +47,24 @@ app.mount("/media", StaticFiles(directory="media"), name="media")
 # Database setup
 # ----------------------------------------------------
 DB_URL = os.getenv("DATABASE_URL", "sqlite:///./app.db")
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False} if DB_URL.startswith("sqlite") else {})
+
+# Configure connection pooling for better performance and reliability
+if DB_URL.startswith("sqlite"):
+    engine = create_engine(
+        DB_URL,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True  # Verify connections before using them
+    )
+else:
+    engine = create_engine(
+        DB_URL,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),  # Default 10 connections
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),  # Allow up to 20 additional connections
+        pool_pre_ping=True,  # Verify connections before using them
+        pool_recycle=3600,  # Recycle connections after 1 hour
+        echo=os.getenv("DB_ECHO", "false").lower() in ("1", "true", "yes")
+    )
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -82,7 +84,7 @@ class Note(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     consultation_id = Column(Integer, ForeignKey("consultations.id"), nullable=True, index=True)
     text = Column(Text, default="")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, index=True)
     user = relationship("User", back_populates="notes")
 
 
@@ -96,8 +98,9 @@ class Consultation(Base):
     audio_path = Column(String(1024), nullable=True)
     audio_url = Column(String(2048), nullable=True)
     transcript = Column(Text, default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     user = relationship("User")
+    patient_rel = relationship("Patient")
 
 
 class Patient(Base):
@@ -108,8 +111,39 @@ class Patient(Base):
     mrn = Column(String(255), nullable=True)
     dob = Column(String(32), nullable=True)
     contact = Column(String(255), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
     __table_args__ = (UniqueConstraint('user_id', 'name', name='uq_patient_user_name'),)
+
+
+class ConsultationConsent(Base):
+    """Records consent confirmation for specific consultation recording/transcription"""
+    __tablename__ = "consultation_consents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    consultation_id = Column(Integer, ForeignKey("consultations.id"), unique=True, nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True, index=True)
+
+    # Consent details
+    consent_given = Column(Boolean, default=False, nullable=False)
+    consent_timestamp = Column(DateTime, nullable=False, index=True)
+    consent_method = Column(String(100), default="verbal", nullable=False)
+
+    # Audit information
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+
+    # Optional withdrawal tracking
+    withdrawn = Column(Boolean, default=False, nullable=False, index=True)
+    withdrawn_at = Column(DateTime, nullable=True)
+
+    # Additional notes
+    notes = Column(Text, nullable=True)
+
+    # Relationships
+    user = relationship("User")
+    consultation = relationship("Consultation", backref="consent")
+    patient = relationship("Patient")
 
 
 def init_db():
@@ -148,6 +182,27 @@ def hash_password(password: str) -> str:
 
 def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
+
+
+def validate_password_strength(password: str) -> None:
+    """Validate password meets security requirements"""
+    if len(password) < 12:
+        raise HTTPException(status_code=400, detail="Password must be at least 12 characters long")
+    if not any(c.isupper() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter")
+    if not any(c.islower() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one lowercase letter")
+    if not any(c.isdigit() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one number")
+
+
+def sanitize_html(text: str) -> str:
+    """Sanitize user input to prevent XSS attacks"""
+    if not text:
+        return text
+    # Allow basic formatting but strip dangerous tags
+    allowed_tags = ['b', 'i', 'u', 'em', 'strong', 'p', 'br', 'ul', 'ol', 'li']
+    return bleach.clean(text, tags=allowed_tags, strip=True)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -223,6 +278,8 @@ class ConsultationIn(BaseModel):
     transcript: Optional[str] = None
     audio_filename: Optional[str] = None  # stored filename under media/audio
     audio_url: Optional[str] = None       # absolute URL (e.g., S3)
+    consent_given: Optional[bool] = False
+    consent_timestamp: Optional[str] = None
 
 
 class ConsultationOut(BaseModel):
@@ -232,6 +289,23 @@ class ConsultationOut(BaseModel):
     transcript: Optional[str]
     audio_url: Optional[str]
     created_at: str
+    consent_given: Optional[bool] = None
+
+    class Config:
+        orm_mode = True
+
+
+class ConsentLogOut(BaseModel):
+    id: int
+    consultation_id: int
+    user_id: int
+    patient_id: Optional[int]
+    patient_name: Optional[str]
+    consent_given: bool
+    consent_timestamp: str
+    consent_method: str
+    ip_address: Optional[str]
+    withdrawn: bool
 
     class Config:
         orm_mode = True
@@ -274,7 +348,22 @@ class SoapNotesOut(BaseModel):
 # ----------------------------------------------------
 @app.on_event("startup")
 def _startup():
+    global whisper_model
+    validate_config()
     init_db()
+
+    # Load Whisper model once at startup if using local transcription
+    if TRANSCRIBE_BACKEND == "local":
+        try:
+            from faster_whisper import WhisperModel
+            model_size = os.getenv("WHISPER_MODEL_SIZE", os.getenv("WHISPER_MODEL", "small"))
+            print(f"Loading Whisper model ({model_size})...")
+            whisper_model = WhisperModel(model_size)
+            print("Whisper model loaded successfully")
+        except Exception as e:
+            print(f"WARNING: Failed to load Whisper model: {e}")
+            print("Transcription will not be available")
+
     # Lightweight migration: backfill patients from legacy consultation.patient
     try:
         Base.metadata.create_all(bind=engine)
@@ -319,7 +408,9 @@ def health():
 
 
 @app.post("/auth/register", response_model=UserOut)
-def register(payload: RegisterIn, response: Response, db: Session = Depends(get_db)):
+@limiter.limit("5/hour")
+def register(request: Request, payload: RegisterIn, response: Response, db: Session = Depends(get_db)):
+    validate_password_strength(payload.password)
     existing = db.query(User).filter(User.email == payload.email.lower()).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -341,7 +432,8 @@ def register(payload: RegisterIn, response: Response, db: Session = Depends(get_
 
 
 @app.post("/auth/login", response_model=UserOut)
-def login(form: RegisterIn, response: Response, db: Session = Depends(get_db)):
+@limiter.limit("10/minute")
+def login(request: Request, form: RegisterIn, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == form.email.lower()).first()
     if not user or not verify_password(form.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -377,17 +469,27 @@ def list_patients(user: User = Depends(get_current_user), db: Session = Depends(
 
 @app.post("/patients", response_model=PatientOut)
 def create_patient(payload: PatientIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    name = (payload.name or '').strip()
+    from sqlalchemy.exc import IntegrityError
+    name = sanitize_html((payload.name or '').strip())
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
     existing = db.query(Patient).filter(Patient.user_id == user.id, Patient.name == name).first()
     if existing:
         return PatientOut(id=existing.id, name=existing.name, mrn=existing.mrn, dob=existing.dob, contact=existing.contact, created_at=existing.created_at.isoformat() + "Z")
-    p = Patient(user_id=user.id, name=name, mrn=payload.mrn, dob=payload.dob, contact=payload.contact)
+    sanitized_contact = sanitize_html(payload.contact) if payload.contact else None
+    p = Patient(user_id=user.id, name=name, mrn=payload.mrn, dob=payload.dob, contact=sanitized_contact)
     db.add(p)
-    db.commit()
-    db.refresh(p)
-    return PatientOut(id=p.id, name=p.name, mrn=p.mrn, dob=p.dob, contact=p.contact, created_at=p.created_at.isoformat() + "Z")
+    try:
+        db.commit()
+        db.refresh(p)
+        return PatientOut(id=p.id, name=p.name, mrn=p.mrn, dob=p.dob, contact=p.contact, created_at=p.created_at.isoformat() + "Z")
+    except IntegrityError:
+        # Race condition: another request created the same patient
+        db.rollback()
+        existing = db.query(Patient).filter(Patient.user_id == user.id, Patient.name == name).first()
+        if existing:
+            return PatientOut(id=existing.id, name=existing.name, mrn=existing.mrn, dob=existing.dob, contact=existing.contact, created_at=existing.created_at.isoformat() + "Z")
+        raise HTTPException(status_code=500, detail="Failed to create patient")
 
 
 @app.get("/patients/{patient_id}", response_model=PatientOut)
@@ -551,7 +653,9 @@ Respond ONLY with valid JSON in this exact format:
 
     try:
         # Initialize Gemini model
-        client = genai.Client(api_key="REDACTED_GEMINI_API_KEY")
+        if not GEMINI_API_KEY:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured")
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
         response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -603,7 +707,8 @@ def list_notes(user: User = Depends(get_current_user), db: Session = Depends(get
 
 @app.post("/notes", response_model=NoteOut)
 def create_note(note: NoteIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    n = Note(user_id=user.id, consultation_id=note.consultation_id, text=note.text)
+    sanitized_text = sanitize_html(note.text)
+    n = Note(user_id=user.id, consultation_id=note.consultation_id, text=sanitized_text)
     db.add(n)
     db.commit()
     db.refresh(n)
@@ -623,7 +728,7 @@ def update_note(note_id: int, payload: NoteIn, user: User = Depends(get_current_
     n = db.query(Note).filter(Note.id == note_id, Note.user_id == user.id).first()
     if not n:
         raise HTTPException(status_code=404, detail="Note not found")
-    n.text = payload.text
+    n.text = sanitize_html(payload.text)
     n.consultation_id = payload.consultation_id
     n.updated_at = datetime.utcnow()
     db.add(n)
@@ -643,13 +748,14 @@ def delete_note(note_id: int, user: User = Depends(get_current_user), db: Sessio
 
 
 @app.post("/consultations", response_model=ConsultationOut)
-def create_consultation(payload: ConsultationIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_consultation(payload: ConsultationIn, request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from sqlalchemy.exc import IntegrityError
     resolved_audio_url = payload.audio_url or None
     audio_path_str = None
     # Resolve patient
     pid = payload.patient_id
     if not pid and payload.patient_name:
-        name = payload.patient_name.strip()
+        name = sanitize_html(payload.patient_name.strip())
         if name:
             existing = db.query(Patient).filter(Patient.user_id == user.id, Patient.name == name).first()
             if existing:
@@ -657,8 +763,17 @@ def create_consultation(payload: ConsultationIn, user: User = Depends(get_curren
             else:
                 p = Patient(user_id=user.id, name=name)
                 db.add(p)
-                db.flush()
-                pid = p.id
+                try:
+                    db.flush()
+                    pid = p.id
+                except IntegrityError:
+                    # Race condition: another request created the same patient
+                    db.rollback()
+                    existing = db.query(Patient).filter(Patient.user_id == user.id, Patient.name == name).first()
+                    if existing:
+                        pid = existing.id
+                    else:
+                        raise HTTPException(status_code=500, detail="Failed to create patient")
     if payload.audio_filename:
         # Validate file exists under media/audio
         audio_path = Path("media") / "audio" / payload.audio_filename
@@ -674,6 +789,40 @@ def create_consultation(payload: ConsultationIn, user: User = Depends(get_curren
         audio_url=resolved_audio_url,
     )
     db.add(c)
+    db.flush()  # Get consultation ID before creating consent record
+
+    # Create consent record if consent data provided
+    if payload.consent_given and payload.consent_timestamp:
+        consent_ts = datetime.fromisoformat(payload.consent_timestamp.replace('Z', '+00:00'))
+        consent = ConsultationConsent(
+            consultation_id=c.id,
+            user_id=user.id,
+            patient_id=pid,
+            consent_given=payload.consent_given,
+            consent_timestamp=consent_ts,
+            consent_method="verbal",
+            ip_address=request.client.host if request.client else None,
+            user_agent=request.headers.get("User-Agent"),
+        )
+        db.add(consent)
+        db.flush()  # Get consent ID for audit log
+
+        # Log consent action to audit trail
+        try:
+            from security.audit import AuditLogger
+            patient_ref = f"patient_{pid}" if pid else "unknown"
+            AuditLogger.log_consent_action(
+                db=db,
+                user_id=user.id,
+                patient_ref=patient_ref,
+                action="consent_granted",
+                consent_id=str(consent.id),
+                request=request
+            )
+        except Exception as e:
+            # Don't fail the consultation creation if audit logging fails
+            print(f"Warning: Failed to log consent action: {e}")
+
     db.commit()
     db.refresh(c)
     pname = None
@@ -687,19 +836,29 @@ def create_consultation(payload: ConsultationIn, user: User = Depends(get_curren
         transcript=c.transcript,
         audio_url=c.audio_url or (f"/media/audio/{Path(c.audio_path).name}" if c.audio_path else None),
         created_at=c.created_at.isoformat() + "Z",
+        consent_given=payload.consent_given,
     )
 
 
 @app.get("/consultations", response_model=List[ConsultationOut])
 def list_consultations(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    items = db.query(Consultation).filter(Consultation.user_id == user.id).order_by(Consultation.created_at.desc()).all()
+    # Use joinedload to prevent N+1 query problem
+    items = db.query(Consultation)\
+        .options(joinedload(Consultation.patient_rel))\
+        .filter(Consultation.user_id == user.id)\
+        .order_by(Consultation.created_at.desc())\
+        .all()
     out: List[ConsultationOut] = []
     for c in items:
         audio_url = c.audio_url or (f"/media/audio/{Path(c.audio_path).name}" if c.audio_path else None)
         pname = None
-        if c.patient_id:
-            p = db.query(Patient).filter(Patient.id == c.patient_id, Patient.user_id == user.id).first()
-            pname = p.name if p else None
+        if c.patient_rel:
+            pname = c.patient_rel.name
+
+        # Check if consent exists for this consultation
+        consent = db.query(ConsultationConsent).filter(ConsultationConsent.consultation_id == c.id).first()
+        consent_given = consent.consent_given if consent else None
+
         out.append(ConsultationOut(
             id=c.id,
             patient_id=c.patient_id,
@@ -707,16 +866,151 @@ def list_consultations(user: User = Depends(get_current_user), db: Session = Dep
             transcript=c.transcript,
             audio_url=audio_url,
             created_at=c.created_at.isoformat() + "Z",
+            consent_given=consent_given,
         ))
     return out
 
 
-@app.post("/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
+# ============================================================================
+# Consent Logging Endpoints
+# ============================================================================
+
+@app.get("/consent-logs", response_model=List[ConsentLogOut])
+def get_my_consent_logs(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get all consent logs for the current user (doctor's own consultations)"""
+    consents = db.query(ConsultationConsent)\
+        .filter(ConsultationConsent.user_id == user.id)\
+        .order_by(ConsultationConsent.consent_timestamp.desc())\
+        .all()
+
+    out: List[ConsentLogOut] = []
+    for consent in consents:
+        pname = None
+        if consent.patient_id:
+            patient = db.query(Patient).filter(Patient.id == consent.patient_id).first()
+            pname = patient.name if patient else None
+
+        out.append(ConsentLogOut(
+            id=consent.id,
+            consultation_id=consent.consultation_id,
+            user_id=consent.user_id,
+            patient_id=consent.patient_id,
+            patient_name=pname,
+            consent_given=consent.consent_given,
+            consent_timestamp=consent.consent_timestamp.isoformat() + "Z",
+            consent_method=consent.consent_method,
+            ip_address=consent.ip_address,
+            withdrawn=consent.withdrawn,
+        ))
+    return out
+
+
+@app.get("/admin/consent-logs", response_model=List[ConsentLogOut])
+def get_all_consent_logs(request: Request, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Admin endpoint: Get all consent logs across all users"""
+    # Note: In production, add RBAC check here to ensure user has admin role
+    # For now, any authenticated user can access this (you may want to restrict)
+
+    # Log admin access to consent logs
     try:
+        from security.audit import AuditLogger
+        AuditLogger.log(
+            db=db,
+            action="read",
+            resource_type="consent_logs",
+            user_id=user.id,
+            resource_id="all",
+            request=request,
+            success=True,
+            metadata={"admin_access": True}
+        )
+    except Exception as e:
+        print(f"Warning: Failed to log admin consent access: {e}")
+
+    consents = db.query(ConsultationConsent)\
+        .order_by(ConsultationConsent.consent_timestamp.desc())\
+        .all()
+
+    out: List[ConsentLogOut] = []
+    for consent in consents:
+        pname = None
+        if consent.patient_id:
+            patient = db.query(Patient).filter(Patient.id == consent.patient_id).first()
+            pname = patient.name if patient else None
+
+        out.append(ConsentLogOut(
+            id=consent.id,
+            consultation_id=consent.consultation_id,
+            user_id=consent.user_id,
+            patient_id=consent.patient_id,
+            patient_name=pname,
+            consent_given=consent.consent_given,
+            consent_timestamp=consent.consent_timestamp.isoformat() + "Z",
+            consent_method=consent.consent_method,
+            ip_address=consent.ip_address,
+            withdrawn=consent.withdrawn,
+        ))
+    return out
+
+
+@app.get("/consultations/{consultation_id}/consent", response_model=ConsentLogOut)
+def get_consultation_consent(consultation_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Get consent record for a specific consultation"""
+    # Verify the consultation belongs to the user
+    consultation = db.query(Consultation).filter(
+        Consultation.id == consultation_id,
+        Consultation.user_id == user.id
+    ).first()
+    if not consultation:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+
+    consent = db.query(ConsultationConsent).filter(
+        ConsultationConsent.consultation_id == consultation_id
+    ).first()
+
+    if not consent:
+        raise HTTPException(status_code=404, detail="Consent record not found")
+
+    pname = None
+    if consent.patient_id:
+        patient = db.query(Patient).filter(Patient.id == consent.patient_id).first()
+        pname = patient.name if patient else None
+
+    return ConsentLogOut(
+        id=consent.id,
+        consultation_id=consent.consultation_id,
+        user_id=consent.user_id,
+        patient_id=consent.patient_id,
+        patient_name=pname,
+        consent_given=consent.consent_given,
+        consent_timestamp=consent.consent_timestamp.isoformat() + "Z",
+        consent_method=consent.consent_method,
+        ip_address=consent.ip_address,
+        withdrawn=consent.withdrawn,
+    )
+
+
+@app.post("/transcribe")
+@limiter.limit("20/hour")
+async def transcribe(request: Request, audio: UploadFile = File(...)):
+    try:
+        # Validate file size (max 50MB)
+        MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB in bytes
         content = await audio.read()
         if not content:
             raise HTTPException(status_code=400, detail="Empty audio file")
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=413, detail="File too large. Maximum size is 50MB")
+
+        # Validate content type
+        if audio.content_type and not audio.content_type.startswith("audio/"):
+            raise HTTPException(status_code=400, detail="Invalid file type. Only audio files are allowed")
+
+        # Validate file extension
+        filename = audio.filename or ""
+        allowed_extensions = [".webm", ".wav", ".mp3", ".m4a", ".ogg", ".flac"]
+        if not any(filename.lower().endswith(ext) for ext in allowed_extensions):
+            raise HTTPException(status_code=400, detail=f"Invalid file extension. Allowed: {', '.join(allowed_extensions)}")
         # Persist audio to disk under media/audio
         fn = f"consult_{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}_{secrets.token_hex(6)}.webm"
         audio_file_path = Path("media") / "audio" / fn
@@ -750,11 +1044,12 @@ async def transcribe(audio: UploadFile = File(...)):
                 )
             text = resp.text if hasattr(resp, 'text') else resp.get("text", "")
         else:
-            from faster_whisper import WhisperModel
-            model_size = os.getenv("WHISPER_MODEL_SIZE", os.getenv("WHISPER_MODEL", "small"))
-            model = WhisperModel(model_size)
-            segments, _ = model.transcribe(str(audio_file_path))
-            text = " ".join([segment["text"] for segment in segments])
+            # Use pre-loaded Whisper model
+            if whisper_model is None:
+                raise HTTPException(status_code=503, detail="Whisper model not loaded. Please check server configuration.")
+            segments, _ = whisper_model.transcribe(str(audio_file_path))
+            # Fix: segments is an iterator, not a list of dicts
+            text = " ".join([seg.text for seg in segments])
         return {"text": text or "", "audio_filename": fn, "audio_url": audio_url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transcription error: {str(e)}")
